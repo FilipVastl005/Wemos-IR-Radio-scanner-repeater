@@ -35,6 +35,179 @@ void handleToggleRadio();
 void handleRepeatSignal();
 void handleStatus();
 
+// HTML content - stored as a raw string literal
+const char index_html[] PROGMEM = R"=====(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wemos IR Scanner</title>
+    <style>
+    body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+        background-color: #f5f5f5;
+    }
+    h1 {
+        color: #333;
+    }
+    h2 {
+        color: #555;
+        margin-top: 20px;
+    }
+    button {
+        padding: 10px 20px;
+        margin: 5px;
+        font-size: 14px;
+        cursor: pointer;
+        border: none;
+        border-radius: 4px;
+        background-color: #4CAF50;
+        color: white;
+        transition: background-color 0.3s;
+    }
+    button:hover {
+        background-color: #45a049;
+    }
+    button:active {
+        background-color: #3d8b40;
+    }
+    .controls {
+        background-color: white;
+        padding: 20px;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-bottom: 20px;
+    }
+    .logs {
+        background-color: white;
+        padding: 20px;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .log-messages {
+        border: 1px solid #ccc;
+        padding: 10px;
+        height: 300px;
+        overflow-y: scroll;
+        background-color: #fafafa;
+        font-family: 'Courier New', monospace;
+        font-size: 12px;
+    }
+    .log-messages p {
+        margin: 5px 0;
+        padding: 2px 0;
+    }
+    .info {
+        background-color: white;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-bottom: 20px;
+    }
+    </style>
+</head>
+<body>
+    <h1>Wemos IR Radio Scanner Repeater</h1>
+    
+    <div class="info">
+        <p>Use this interface to monitor and control IR signals.</p>
+    </div>
+
+    <div class="controls">
+        <h2>Controls</h2>
+        <button id="start-scan">Start Scan</button>
+        <button id="stop-scan">Stop Scan</button>
+        <button id="repeat-signal">Repeat Last Signal</button>
+    </div>
+    
+    <div class="logs">
+        <h2>Logs</h2>
+        <div class="log-messages" id="log-messages">
+            <p>No logs yet. Waiting for commands...</p>
+        </div>
+    </div>
+
+    <script>
+        const startScanBtn = document.getElementById('start-scan');
+        const stopScanBtn = document.getElementById('stop-scan');
+        const repeatSignalBtn = document.getElementById('repeat-signal');
+        const logMessages = document.getElementById('log-messages');
+
+        function addLog(message, type) {
+            type = type || 'info';
+            const timestamp = new Date().toLocaleTimeString();
+            let color = '';
+            if (type === 'error') color = 'color: red;';
+            else if (type === 'success') color = 'color: green;';
+            logMessages.innerHTML += '<p style="' + color + '">[' + timestamp + '] ' + message + '</p>';
+            logMessages.scrollTop = logMessages.scrollHeight;
+        }
+
+        startScanBtn.addEventListener('click', function() {
+            addLog('Starting IR scan...');
+            fetch('/toggleIR')
+                .then(function(response) { return response.text(); })
+                .then(function(text) {
+                    addLog(text, 'success');
+                })
+                .catch(function(error) {
+                    addLog('Error: ' + error, 'error');
+                });
+        });
+
+        stopScanBtn.addEventListener('click', function() {
+            addLog('Stopping IR scan...');
+            fetch('/toggleIR')
+                .then(function(response) { return response.text(); })
+                .then(function(text) {
+                    addLog(text, 'success');
+                })
+                .catch(function(error) {
+                    addLog('Error: ' + error, 'error');
+                });
+        });
+
+        repeatSignalBtn.addEventListener('click', function() {
+            addLog('Attempting to repeat last IR signal...');
+            fetch('/repeatSignal')
+                .then(function(response) { return response.text(); })
+                .then(function(text) {
+                    addLog(text, text.indexOf('✓') >= 0 ? 'success' : 'error');
+                })
+                .catch(function(error) {
+                    addLog('Error: ' + error, 'error');
+                });
+        });
+
+        setInterval(function() {
+            fetch('/status')
+                .then(function(response) { return response.json(); })
+                .then(function(data) {
+                    console.log('Status:', data);
+                })
+                .catch(function(error) {
+                    console.error('Status error:', error);
+                });
+        }, 3000);
+
+        window.addEventListener('load', function() {
+            addLog('Web interface loaded.');
+            fetch('/status')
+                .then(function(response) { return response.json(); })
+                .then(function(data) {
+                    addLog('Connected to device!', 'success');
+                })
+                .catch(function(error) {
+                    addLog('Could not connect to device.', 'error');
+                });
+        });
+    </script>
+</body>
+</html>
+)=====";
+
 void setup() {
   Serial.begin(115200);
   delay(100);
@@ -115,199 +288,7 @@ void loop() {
 
 // Handler for root page - serves the HTML interface
 void handleRoot() {
-  String html = F("<!DOCTYPE html>
-<html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Wemos IR Radio Scanner Repeater</title>
-        <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            background-color: #f5f5f5;
-        }
-        h1 {
-            color: #333;
-        }
-        h2 {
-            color: #555;
-            margin-top: 20px;
-        }
-        button {
-            padding: 10px 20px;
-            margin: 5px;
-            font-size: 14px;
-            cursor: pointer;
-            border: none;
-            border-radius: 4px;
-            background-color: #4CAF50;
-            color: white;
-            transition: background-color 0.3s;
-        }
-        button:hover {
-            background-color: #45a049;
-        }
-        button:active {
-            background-color: #3d8b40;
-        }
-        #controls {
-            background-color: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-        }
-        #logs {
-            background-color: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        #log-messages {
-            border: 1px solid #ccc;
-            padding: 10px;
-            height: 300px;
-            overflow-y: scroll;
-            background-color: #fafafa;
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
-        }
-        #log-messages p {
-            margin: 5px 0;
-            padding: 2px 0;
-        }
-        .info {
-            background-color: white;
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-        }
-        </style>
-    </head>
-    <body>
-        <h1>Wemos IR Radio Scanner Repeater</h1>
-        
-        <div class="info">
-            <p>This is the web interface for the Wemos IR Radio Scanner Repeater project. Use this interface to monitor and control the IR signals being scanned and repeated by the device.</p>
-            
-            <h2>Features</h2>
-            <ul>
-                <li>Scan for IR signals from various remote controls.</li>
-                <li>Repeat captured IR signals to control devices.</li>
-                <li>View real-time data on scanned IR signals.</li>
-            </ul>
-            
-            <h2>Instructions</h2>
-            <ol>
-                <li>Connect your Wemos device to the network.</li>
-                <li>Open this web interface in your browser.</li>
-                <li>Use the controls provided to start scanning or repeating IR signals.</li>
-            </ol>
-        </div>
-
-        <div id="controls">
-            <h2>Controls</h2>
-            <button id="start-scan">Start Scan</button>
-            <button id="stop-scan">Stop Scan</button>
-            <button id="repeat-signal">Repeat Last Signal</button>
-        </div>
-        
-        <div id="logs">
-            <h2>Logs</h2>
-            <div id="log-messages">
-                <p>No logs yet. Waiting for commands...</p>
-            </div>
-        </div>
-
-        <script>
-            const startScanBtn = document.getElementById('start-scan');
-            const stopScanBtn = document.getElementById('stop-scan');
-            const repeatSignalBtn = document.getElementById('repeat-signal');
-            const logMessages = document.getElementById('log-messages');
-
-            // Helper function to add log messages with timestamp
-            function addLog(message, type = 'info') {
-                const timestamp = new Date().toLocaleTimeString();
-                const color = type === 'error' ? 'color: red;' : type === 'success' ? 'color: green;' : '';
-                logMessages.innerHTML += `<p style="${color}">[${timestamp}] ${message}</p>`;
-                logMessages.scrollTop = logMessages.scrollHeight;
-            }
-
-            // Start scan button handler
-            startScanBtn.addEventListener('click', () => {
-                addLog('Starting IR scan...');
-                fetch('/toggleIR')
-                    .then(response => response.text())
-                    .then(text => {
-                        addLog(text, 'success');
-                    })
-                    .catch(error => {
-                        addLog('Error starting scan: ' + error, 'error');
-                    });
-            });
-
-            // Stop scan button handler
-            stopScanBtn.addEventListener('click', () => {
-                addLog('Stopping IR scan...');
-                fetch('/toggleIR')
-                    .then(response => response.text())
-                    .then(text => {
-                        addLog(text, 'success');
-                    })
-                    .catch(error => {
-                        addLog('Error stopping scan: ' + error, 'error');
-                    });
-            });
-
-            // Repeat signal button handler (THIS WAS MISSING!)
-            repeatSignalBtn.addEventListener('click', () => {
-                addLog('Attempting to repeat last IR signal...');
-                fetch('/repeatSignal')
-                    .then(response => response.text())
-                    .then(text => {
-                        addLog(text, text.includes('✓') ? 'success' : 'error');
-                    })
-                    .catch(error => {
-                        addLog('Error repeating signal: ' + error, 'error');
-                    });
-            });
-
-            // Auto-update status every 3 seconds
-            setInterval(() => {
-                fetch('/status')
-                    .then(response => response.json())
-                    .then(data => {
-                        // You can use this data to update UI elements
-                        console.log('Status:', data);
-                        if (data.lastIrCode && data.lastIrCode !== '0x0') {
-                            // Log new IR signals detected
-                            // addLog(`IR Signal: ${data.lastIrCode} (${data.lastIrProtocol})`);
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Status update error:', error);
-                    });
-            }, 3000);
-
-            // Initial connection check
-            window.addEventListener('load', () => {
-                addLog('Web interface loaded. Checking connection to device...');
-                fetch('/status')
-                    .then(response => response.json())
-                    .then(data => {
-                        addLog('✓ Connected to Wemos device successfully!', 'success');
-                    })
-                    .catch(error => {
-                        addLog('✗ Could not connect to device. Please check connection.', 'error');
-                    });
-            });
-        </script>
-    </body>
-</html>");
-
-  server.send(200, "text/html", html);
+  server.send_P(200, "text/html", index_html);
 }
 
 // Handler to toggle IR scanning
@@ -318,11 +299,11 @@ void handleToggleIR() {
     IrReceiver.enableIRIn();
     Serial.println("[i:46:22 PM] Starting IR scan...");
     Serial.println("IR scanning ENABLED");
-    server.send(200, "text/plain", "✓ IR scanning enabled");
+    server.send(200, "text/plain", "IR scanning enabled");
   } else {
     IrReceiver.disableIRIn();
     Serial.println("IR scanning DISABLED");
-    server.send(200, "text/plain", "✗ IR scanning disabled");
+    server.send(200, "text/plain", "IR scanning disabled");
   }
 }
 
@@ -332,10 +313,10 @@ void handleToggleRadio() {
   
   if (radioEnabled) {
     Serial.println("Radio enabled");
-    server.send(200, "text/plain", "✓ Radio enabled");
+    server.send(200, "text/plain", "Radio enabled");
   } else {
     Serial.println("Radio disabled");
-    server.send(200, "text/plain", "✗ Radio disabled");
+    server.send(200, "text/plain", "Radio disabled");
   }
 }
 
@@ -373,10 +354,10 @@ void handleRepeatSignal() {
         break;
     }
     
-    server.send(200, "text/plain", "✓ Last signal repeated");
+    server.send(200, "text/plain", "Last signal repeated");
   } else {
     Serial.println("No signal to repeat yet");
-    server.send(200, "text/plain", "✗ No signal captured yet");
+    server.send(200, "text/plain", "No signal captured yet");
   }
 }
 

@@ -1,403 +1,394 @@
-/*
- * IR and Radio Controller for ESP8266
- * 
- * This project allows you to:
- * - Send and receive IR signals (like TV remotes)
- * - Send and receive 433MHz radio signals (like wireless outlets)
- * - Control everything via Serial commands or Web interface
- * 
- * Hardware needed:
- * - ESP8266 board (WeMos D1 Mini or similar)
- * - IR LED and IR receiver
- * - 433MHz transmitter and receiver modules
- * 
- * Libraries required:
- * - IRremote (by shirriff/Arduino-IRremote)
- * - RCSwitch (by sui77)
- */
-
-#include <Arduino.h>
-#include <IRremote.hpp>
-#include <RCSwitch.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+#include <IRrecv.h>
+#include <IRutils.h>
 
-// ============================================================================
-// CONFIGURATION - Change these settings to match your setup
-// ============================================================================
+// WiFi credentials - UPDATE THESE WITH YOUR NETWORK INFO
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
 
-// WiFi Access Point settings (creates its own WiFi network)
-#define APSSID "ESPap"
-#define APPSK "thereisnospoon"
+// Pin definitions
+const uint16_t IR_SEND_PIN = D2;    // IR LED transmitter pin
+const uint16_t IR_RECV_PIN = D5;    // IR receiver pin
 
-// Pin assignments - adjust these if your wiring is different
-#define RADIO_RECEIVE_PIN 5   // GPIO5 (D1 on WeMos)
-#define RADIO_SENDER_PIN  13  // GPIO13 (D7 on WeMos)
-#define IR_RECEIVE_PIN  4     // GPIO4 (D2 on WeMos)
-#define IR_SENDER_PIN 14      // GPIO14 (D5 on WeMos)
+// IR objects
+IRsend IrSender(IR_SEND_PIN);
+IRrecv IrReceiver(IR_RECV_PIN);
+decode_results results;
 
-// ============================================================================
-// GLOBAL VARIABLES
-// ============================================================================
-
-// Radio control object
-RCSwitch mySwitch = RCSwitch();
-
-// Web server running on port 80
+// Web server
 ESP8266WebServer server(80);
 
-// Feature toggles
-bool IRReceiveEnabled = true;
-bool radioReceiveEnabled = false;
+// State variables
+bool irEnabled = false;
+bool radioEnabled = false;
+uint64_t lastIrCode = 0;
+decode_type_t lastIrProtocol = UNKNOWN;
+uint16_t lastIrBits = 0;
 
-// For storing received data
-uint32_t lastIrCode = 0;
-String command = "";
-
-// ============================================================================
-// WEB INTERFACE - HTML page stored in program memory
-// ============================================================================
-
-const char INDEX_HTML[] PROGMEM = R"=====(
-<!DOCTYPE html>
-<html>
-<head>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body { 
-      font-family: sans-serif; 
-      text-align: center; 
-      background: #222; 
-      color: #eee; 
-      margin: 0;
-      padding: 20px;
-    }
-    h1 { color: #03A062; }
-    .card { 
-      background: #333; 
-      padding: 20px; 
-      margin: 20px auto; 
-      border-radius: 10px; 
-      box-shadow: 0 4px 8px rgba(0,0,0,0.5);
-      max-width: 600px;
-    }
-    button { 
-      padding: 15px 30px; 
-      font-size: 16px; 
-      cursor: pointer; 
-      border: none; 
-      border-radius: 5px; 
-      background: #03A062; 
-      color: white;
-      margin: 10px;
-    }
-    button:active { background: #028050; }
-    #data-log { 
-      background: #000; 
-      color: #0f0; 
-      padding: 10px; 
-      text-align: left; 
-      height: 200px; 
-      overflow-y: scroll; 
-      font-family: monospace;
-      font-size: 12px;
-      border-radius: 5px;
-    }
-  </style>
-</head>
-<body>
-  <h1>🎛️ IR/Radio Controller</h1>
-  
-  <div class="card">
-    <h3>Scanner Controls</h3>
-    <button onclick="sendCmd('/toggleIR')">Toggle IR Scanner</button>
-    <button onclick="sendCmd('/toggleRadio')">Toggle Radio Scanner</button>
-  </div>
-  
-  <div class="card">
-    <h3>📡 Captured Signals:</h3>
-    <div id="data-log">Waiting for signals...<br></div>
-  </div>
-
-  <script>
-    function sendCmd(path) {
-      fetch(path)
-        .then(response => response.text())
-        .then(txt => {
-          alert(txt);
-          addLog('Command sent: ' + txt);
-        });
-    }
-    
-    function addLog(msg) {
-      const log = document.getElementById('data-log');
-      const time = new Date().toLocaleTimeString();
-      log.innerHTML += '[' + time + '] ' + msg + '<br>';
-      log.scrollTop = log.scrollHeight;
-    }
-    
-    // Update data every 2 seconds
-    setInterval(() => {
-      fetch('/status')
-        .then(r => r.json())
-        .then(data => {
-          if(data.lastIR && data.lastIR !== '0') {
-            addLog('IR Signal: 0x' + data.lastIR);
-          }
-        })
-        .catch(err => console.log('Status update failed'));
-    }, 2000);
-  </script>
-</body>
-</html>
-)=====";
-
-// ============================================================================
-// SETUP - Runs once when the board starts
-// ============================================================================
+// Function declarations
+void handleRoot();
+void handleToggleIR();
+void handleToggleRadio();
+void handleRepeatSignal();
+void handleStatus();
 
 void setup() {
-  // Start serial communication for debugging and commands
   Serial.begin(115200);
-  delay(1000);
+  delay(100);
   Serial.println("\n\n=================================");
-  Serial.println("IR/Radio Controller Starting...");
-  Serial.println("=================================\n");
-  
-  // Initialize IR transmitter and receiver
-  Serial.println("Setting up IR...");
-  IrReceiver.begin(IR_RECEIVE_PIN);
-  IrSender.begin(IR_SENDER_PIN); 
-  IrSender.enableIROut(38);  // 38kHz carrier frequency
-  Serial.println("✓ IR ready");
-  
-  // Initialize radio transmitter and receiver
-  Serial.println("Setting up Radio...");
-  mySwitch.enableReceive(RADIO_RECEIVE_PIN);
-  mySwitch.enableTransmit(RADIO_SENDER_PIN);
-  Serial.println("✓ Radio ready");
-  
-  // Start WiFi Access Point
-  Serial.println("Setting up WiFi...");
-  WiFi.softAP(APSSID, APPSK);
-  Serial.print("✓ WiFi AP started - IP: ");
-  Serial.println(WiFi.softAPIP());
-  
-  // Configure web server routes
-  server.on("/", handleRoot);
-  server.on("/toggleIR", handleToggleIR);
-  server.on("/toggleRadio", handleToggleRadio);
-  server.on("/status", handleStatus);
-  server.begin();
-  Serial.println("✓ Web server started");
-  
-  Serial.println("\n=================================");
-  Serial.println("Setup complete! Ready for commands.");
+  Serial.println("Wemos IR Radio Scanner Repeater");
   Serial.println("=================================");
-  Serial.println("\nAvailable commands:");
-  Serial.println("  ir <protocol> <address> <command> <repeats>");
-  Serial.println("  radio <pulseLength> <code> <bitLength> <protocol>");
-  Serial.println("  help");
-  Serial.println("\nConnect to WiFi: " + String(APSSID));
-  Serial.println("Password: " + String(APPSK));
-  Serial.println("Open browser to: http://" + WiFi.softAPIP().toString());
-  Serial.println();
-}
 
-// ============================================================================
-// MAIN LOOP - Runs continuously
-// ============================================================================
+  // Initialize IR sender
+  IrSender.begin();
+  Serial.println("IR Sender initialized");
+  
+  // Initialize IR receiver
+  IrReceiver.enableIRIn();
+  Serial.println("IR Receiver initialized");
+  
+  // Connect to WiFi
+  Serial.println("\nConnecting to WiFi...");
+  Serial.print("SSID: ");
+  Serial.println(ssid);
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n\nWiFi Connected!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("Access web interface at: http://");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n\nWiFi Connection Failed!");
+    Serial.println("Please check your credentials and try again.");
+  }
+
+  // Setup web server routes
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/toggleIR", HTTP_GET, handleToggleIR);
+  server.on("/toggleRadio", HTTP_GET, handleToggleRadio);
+  server.on("/repeatSignal", HTTP_GET, handleRepeatSignal);
+  server.on("/status", HTTP_GET, handleStatus);
+  
+  server.begin();
+  Serial.println("Web server started");
+  Serial.println("=================================");
+  Serial.println("Ready to receive IR signals!");
+  Serial.println("=================================\n");
+}
 
 void loop() {
-  // Handle web server requests
   server.handleClient();
   
-  // Check for serial commands
-  handleSerialCommands();
-  
-  // Check for incoming IR signals
-  if (IRReceiveEnabled) {
-    checkIRReceiver();
-  }
-  
-  // Check for incoming radio signals
-  if (radioReceiveEnabled) {
-    checkRadioReceiver();
-  }
-}
-
-// ============================================================================
-// SERIAL COMMAND HANDLING
-// ============================================================================
-
-void handleSerialCommands() {
-  if (Serial.available()) {
-    command = Serial.readStringUntil('\n');
-    command.trim();
+  // Check for IR signals if scanning is enabled
+  if (irEnabled && IrReceiver.decode(&results)) {
+    lastIrCode = results.value;
+    lastIrProtocol = results.decode_type;
+    lastIrBits = results.bits;
     
-    if (command.startsWith("ir")) {
-      // Parse IR command: ir <protocol> <address> <command> <repeats>
-      command.remove(0, 2);
-      command.trim(); 
-      
-      int protocolIndex = command.indexOf(' ');
-      String protocol = command.substring(0, protocolIndex);
-
-      int addressIndex = command.indexOf(' ', protocolIndex + 1);
-      uint16_t address = command.substring(protocolIndex + 1, addressIndex).toInt();
-
-      int commandIndex = command.indexOf(' ', addressIndex + 1);
-      uint16_t commandIR = command.substring(addressIndex + 1, commandIndex).toInt();
-
-      int repeatsIndex = command.indexOf(' ', commandIndex + 1);
-      int_fast8_t repeats = command.substring(commandIndex + 1, repeatsIndex).toInt();
-      
-      Serial.println("Sending IR signal...");
-      sendIR(protocol, address, commandIR, repeats);
-      Serial.println("✓ IR signal sent");
-      
-    } else if (command.startsWith("radio")) {
-      // Parse radio command: radio <pulseLength> <code> <bitLength> <protocol>
-      command.remove(0, 5);
-      command.trim();
-      
-      int pulseLengthIndex = command.indexOf(' ');
-      int pulseLength = command.substring(0, pulseLengthIndex).toInt();
-      
-      int codeIndex = command.indexOf(' ', pulseLengthIndex + 1);
-      int code = command.substring(pulseLengthIndex + 1, codeIndex).toInt();
-      
-      int bitLengthIndex = command.indexOf(' ', codeIndex + 1);
-      int bitLength = command.substring(codeIndex + 1, bitLengthIndex).toInt();
-      
-      int protocol = command.substring(bitLengthIndex + 1).toInt();
-      if (protocol == 0) protocol = 1; // Default to protocol 1
-      
-      Serial.println("Sending radio signal...");
-      sendRadio(pulseLength, code, bitLength, protocol);
-      Serial.println("✓ Radio signal sent");
-      
-    } else if (command.startsWith("help")) {
-      showHelp();
-      
-    } else {
-      Serial.println("❌ Unknown command");
-      showHelp();
-    }
-  }
-}
-
-void showHelp() {
-  Serial.println("\n=================================");
-  Serial.println("COMMAND HELP");
-  Serial.println("=================================");
-  Serial.println("\nIR Commands:");
-  Serial.println("  ir <protocol> <address> <command> <repeats>");
-  Serial.println("  Protocols: NEC, NEC2, Samsung, Onkyo, NECext");
-  Serial.println("  Example: ir NEC 61184 3 0");
-  Serial.println("\nRadio Commands:");
-  Serial.println("  radio <pulseLength> <code> <bitLength> <protocol>");
-  Serial.println("  Example: radio 350 5393 24 1");
-  Serial.println("\nOther:");
-  Serial.println("  help - Show this help message");
-  Serial.println("=================================\n");
-}
-
-// ============================================================================
-// IR FUNCTIONS
-// ============================================================================
-
-void sendIR(String protocol, uint16_t address, uint16_t command, int_fast8_t repeats) {
-  if (protocol.equalsIgnoreCase("NEC")) {
-    IrSender.sendNEC(address, command, repeats);
-  } else if (protocol.equalsIgnoreCase("NEC2")) {
-    IrSender.sendNEC2(address, command, repeats);
-  } else if (protocol.equalsIgnoreCase("Samsung")) {
-    IrSender.sendSamsung(address, command, repeats);
-  } else if (protocol.equalsIgnoreCase("Onkyo") || protocol.equalsIgnoreCase("NECext")) {
-    IrSender.sendOnkyo(address, command, repeats);
-  } else {
-    Serial.println("❌ Unknown IR protocol: " + protocol);
-  }
-}
-
-void checkIRReceiver() {
-  if (IrReceiver.decode()) {
-    if (IrReceiver.decodedIRData.protocol == UNKNOWN) {
-      // Unknown protocol - show raw data
-      auto tDecodedRawData = IrReceiver.decodedIRData.decodedRawData;
-      Serial.print(F("📡 Raw IR data: 0x"));
-      Serial.println(tDecodedRawData, HEX);
-    } else {
-      // Known protocol - show decoded info
-      Serial.println("📡 IR Signal Received:");
-      IrReceiver.printIRResultShort(&Serial);
-      IrReceiver.printIRSendUsage(&Serial);
-      
-      // Store for web interface
-      lastIrCode = IrReceiver.decodedIRData.decodedRawData;
-    }
-    IrReceiver.resume();  // Ready for next signal
-  }
-}
-
-// ============================================================================
-// RADIO FUNCTIONS
-// ============================================================================
-
-void sendRadio(int nPulseLength, int decimalCode, int bitLength, int protocol) {
-  Serial.println("Using protocol: " + String(protocol));
-  
-  mySwitch.setProtocol(protocol);
-  mySwitch.setPulseLength(nPulseLength);
-  mySwitch.send(decimalCode, bitLength);
-}
-
-void checkRadioReceiver() {
-  if (mySwitch.available()) {
-    Serial.println("📻 Radio Signal Received:");
-    Serial.print("  Code: ");
-    Serial.println(mySwitch.getReceivedValue());
-    Serial.print("  Bit length: ");
-    Serial.println(mySwitch.getReceivedBitlength());
-    Serial.print("  Pulse length: ");
-    Serial.println(mySwitch.getReceivedDelay());
+    Serial.println("---------------------------");
+    Serial.print("IR Signal Received!");
+    Serial.print("\n  Code: 0x");
+    Serial.println(lastIrCode, HEX);
     Serial.print("  Protocol: ");
-    Serial.println(mySwitch.getReceivedProtocol());
+    Serial.println(typeToString(lastIrProtocol));
+    Serial.print("  Bits: ");
+    Serial.println(lastIrBits);
+    Serial.println("---------------------------");
     
-    mySwitch.resetAvailable();
+    IrReceiver.resume();  // Prepare for next signal
   }
 }
 
-// ============================================================================
-// WEB SERVER HANDLERS
-// ============================================================================
-
+// Handler for root page - serves the HTML interface
 void handleRoot() {
-  server.send(200, "text/html", INDEX_HTML);
+  String html = F("<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Wemos IR Radio Scanner Repeater</title>
+        <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+        }
+        h2 {
+            color: #555;
+            margin-top: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            font-size: 14px;
+            cursor: pointer;
+            border: none;
+            border-radius: 4px;
+            background-color: #4CAF50;
+            color: white;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:active {
+            background-color: #3d8b40;
+        }
+        #controls {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        #logs {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        #log-messages {
+            border: 1px solid #ccc;
+            padding: 10px;
+            height: 300px;
+            overflow-y: scroll;
+            background-color: #fafafa;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+        #log-messages p {
+            margin: 5px 0;
+            padding: 2px 0;
+        }
+        .info {
+            background-color: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        </style>
+    </head>
+    <body>
+        <h1>Wemos IR Radio Scanner Repeater</h1>
+        
+        <div class="info">
+            <p>This is the web interface for the Wemos IR Radio Scanner Repeater project. Use this interface to monitor and control the IR signals being scanned and repeated by the device.</p>
+            
+            <h2>Features</h2>
+            <ul>
+                <li>Scan for IR signals from various remote controls.</li>
+                <li>Repeat captured IR signals to control devices.</li>
+                <li>View real-time data on scanned IR signals.</li>
+            </ul>
+            
+            <h2>Instructions</h2>
+            <ol>
+                <li>Connect your Wemos device to the network.</li>
+                <li>Open this web interface in your browser.</li>
+                <li>Use the controls provided to start scanning or repeating IR signals.</li>
+            </ol>
+        </div>
+
+        <div id="controls">
+            <h2>Controls</h2>
+            <button id="start-scan">Start Scan</button>
+            <button id="stop-scan">Stop Scan</button>
+            <button id="repeat-signal">Repeat Last Signal</button>
+        </div>
+        
+        <div id="logs">
+            <h2>Logs</h2>
+            <div id="log-messages">
+                <p>No logs yet. Waiting for commands...</p>
+            </div>
+        </div>
+
+        <script>
+            const startScanBtn = document.getElementById('start-scan');
+            const stopScanBtn = document.getElementById('stop-scan');
+            const repeatSignalBtn = document.getElementById('repeat-signal');
+            const logMessages = document.getElementById('log-messages');
+
+            // Helper function to add log messages with timestamp
+            function addLog(message, type = 'info') {
+                const timestamp = new Date().toLocaleTimeString();
+                const color = type === 'error' ? 'color: red;' : type === 'success' ? 'color: green;' : '';
+                logMessages.innerHTML += `<p style="${color}">[${timestamp}] ${message}</p>`;
+                logMessages.scrollTop = logMessages.scrollHeight;
+            }
+
+            // Start scan button handler
+            startScanBtn.addEventListener('click', () => {
+                addLog('Starting IR scan...');
+                fetch('/toggleIR')
+                    .then(response => response.text())
+                    .then(text => {
+                        addLog(text, 'success');
+                    })
+                    .catch(error => {
+                        addLog('Error starting scan: ' + error, 'error');
+                    });
+            });
+
+            // Stop scan button handler
+            stopScanBtn.addEventListener('click', () => {
+                addLog('Stopping IR scan...');
+                fetch('/toggleIR')
+                    .then(response => response.text())
+                    .then(text => {
+                        addLog(text, 'success');
+                    })
+                    .catch(error => {
+                        addLog('Error stopping scan: ' + error, 'error');
+                    });
+            });
+
+            // Repeat signal button handler (THIS WAS MISSING!)
+            repeatSignalBtn.addEventListener('click', () => {
+                addLog('Attempting to repeat last IR signal...');
+                fetch('/repeatSignal')
+                    .then(response => response.text())
+                    .then(text => {
+                        addLog(text, text.includes('✓') ? 'success' : 'error');
+                    })
+                    .catch(error => {
+                        addLog('Error repeating signal: ' + error, 'error');
+                    });
+            });
+
+            // Auto-update status every 3 seconds
+            setInterval(() => {
+                fetch('/status')
+                    .then(response => response.json())
+                    .then(data => {
+                        // You can use this data to update UI elements
+                        console.log('Status:', data);
+                        if (data.lastIrCode && data.lastIrCode !== '0x0') {
+                            // Log new IR signals detected
+                            // addLog(`IR Signal: ${data.lastIrCode} (${data.lastIrProtocol})`);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Status update error:', error);
+                    });
+            }, 3000);
+
+            // Initial connection check
+            window.addEventListener('load', () => {
+                addLog('Web interface loaded. Checking connection to device...');
+                fetch('/status')
+                    .then(response => response.json())
+                    .then(data => {
+                        addLog('✓ Connected to Wemos device successfully!', 'success');
+                    })
+                    .catch(error => {
+                        addLog('✗ Could not connect to device. Please check connection.', 'error');
+                    });
+            });
+        </script>
+    </body>
+</html>");
+
+  server.send(200, "text/html", html);
 }
 
+// Handler to toggle IR scanning
 void handleToggleIR() {
-  IRReceiveEnabled = !IRReceiveEnabled;
-  String message = IRReceiveEnabled ? "✓ IR Scanner ON" : "✓ IR Scanner OFF";
-  Serial.println(message);
-  server.send(200, "text/plain", message);
+  irEnabled = !irEnabled;
+  
+  if (irEnabled) {
+    IrReceiver.enableIRIn();
+    Serial.println("[i:46:22 PM] Starting IR scan...");
+    Serial.println("IR scanning ENABLED");
+    server.send(200, "text/plain", "✓ IR scanning enabled");
+  } else {
+    IrReceiver.disableIRIn();
+    Serial.println("IR scanning DISABLED");
+    server.send(200, "text/plain", "✗ IR scanning disabled");
+  }
 }
 
+// Handler to toggle radio (placeholder functionality)
 void handleToggleRadio() {
-  radioReceiveEnabled = !radioReceiveEnabled;
-  String message = radioReceiveEnabled ? "✓ Radio Scanner ON" : "✓ Radio Scanner OFF";
-  Serial.println(message);
-  server.send(200, "text/plain", message);
+  radioEnabled = !radioEnabled;
+  
+  if (radioEnabled) {
+    Serial.println("Radio enabled");
+    server.send(200, "text/plain", "✓ Radio enabled");
+  } else {
+    Serial.println("Radio disabled");
+    server.send(200, "text/plain", "✗ Radio disabled");
+  }
 }
 
+// Handler to repeat the last captured IR signal
+void handleRepeatSignal() {
+  if (lastIrCode != 0) {
+    Serial.println("---------------------------");
+    Serial.println("REPEATING SIGNAL");
+    Serial.print("  Code: 0x");
+    Serial.println(lastIrCode, HEX);
+    Serial.print("  Protocol: ");
+    Serial.println(typeToString(lastIrProtocol));
+    Serial.println("---------------------------");
+    
+    // Send the IR signal based on protocol
+    switch (lastIrProtocol) {
+      case NEC:
+        IrSender.sendNEC(lastIrCode, lastIrBits);
+        break;
+      case SONY:
+        IrSender.sendSony(lastIrCode, lastIrBits);
+        break;
+      case RC5:
+        IrSender.sendRC5(lastIrCode, lastIrBits);
+        break;
+      case RC6:
+        IrSender.sendRC6(lastIrCode, lastIrBits);
+        break;
+      case SAMSUNG:
+        IrSender.sendSAMSUNG(lastIrCode, lastIrBits);
+        break;
+      default:
+        // For unknown protocols, try sending as raw
+        IrSender.sendRaw((uint16_t*)&lastIrCode, 1, 38);
+        break;
+    }
+    
+    server.send(200, "text/plain", "✓ Last signal repeated");
+  } else {
+    Serial.println("No signal to repeat yet");
+    server.send(200, "text/plain", "✗ No signal captured yet");
+  }
+}
+
+// Handler to get current status
 void handleStatus() {
-  // Send JSON status update to web interface
   String json = "{";
-  json += "\"heap\":" + String(ESP.getFreeHeap()) + ",";
-  json += "\"lastIR\":\"" + String(lastIrCode, HEX) + "\",";
-  json += "\"irEnabled\":" + String(IRReceiveEnabled ? "true" : "false") + ",";
-  json += "\"radioEnabled\":" + String(radioReceiveEnabled ? "true" : "false");
+  json += "\"irEnabled\":" + String(irEnabled ? "true" : "false") + ",";
+  json += "\"radioEnabled\":" + String(radioEnabled ? "true" : "false") + ",";
+  json += "\"lastIrCode\":\"0x" + String(lastIrCode, HEX) + "\",";
+  json += "\"lastIrProtocol\":\"" + String(typeToString(lastIrProtocol)) + "\",";
+  json += "\"lastIrBits\":" + String(lastIrBits);
   json += "}";
+  
   server.send(200, "application/json", json);
 }
